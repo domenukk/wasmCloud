@@ -93,6 +93,8 @@ impl Bus for Handler {
     ) -> anyhow::Result<()> {
         let interfaces = interfaces.iter().map(Deref::deref);
         let mut targets = self.targets.write().await;
+        // When the link name is "default", we remove all targets for the given interfaces
+        // so they can be routed to the default target
         if link_name == "default" {
             for CallTargetInterface {
                 namespace,
@@ -117,6 +119,38 @@ impl Bus for Handler {
             }
         }
         Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    async fn set_link_name_checked(
+        &self,
+        link_name: String,
+        interfaces: Vec<Arc<CallTargetInterface>>,
+    ) -> anyhow::Result<std::result::Result<(), String>> {
+        let links = self.instance_links.read().await;
+        // Ensure that all interfaces have an established link with the given name.
+        if let Some(interface_missing_link) = interfaces.iter().find_map(|i| {
+            let instance = i.as_instance();
+            // This could be expressed in one line as a `!(bool).then_some`, but the negation makes it confusing
+            if links
+                .get(link_name.as_str())
+                .and_then(|l| l.get(instance.as_str()))
+                .is_none()
+            {
+                Some(instance)
+            } else {
+                None
+            }
+        }) {
+            return Ok(Err(format!(
+                "interface `{}` does not have an existing link with name `{}`",
+                interface_missing_link, link_name
+            )));
+        }
+        // Explicitly drop the lock before calling `set_link_name` just to avoid holding the lock for longer than needed
+        drop(links);
+
+        self.set_link_name(link_name, interfaces).await.map(Ok)
     }
 }
 
